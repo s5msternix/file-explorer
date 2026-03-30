@@ -13,3 +13,24 @@ export async function browse(path) {
 	}
 	return res.json();
 }
+
+/**
+ * @param {string} path
+ * @returns {string}
+ */
+export function getImageUrl(path) {
+	return `${BASE_URL}/file?path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * @param {string} path
+ * @returns {Promise<import('./types').TextContentResponse>}
+ */
+export async function fetchTextContent(path) {
+	const res = await fetch(`${BASE_URL}/text?path=${encodeURIComponent(path)}`);
+	if (!res.ok) {
+		const err = await res.json();
+		throw new Error(err.error || 'Failed to read file');
+	}
+	return res.json();
+}

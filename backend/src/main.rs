@@ -1,13 +1,15 @@
 use axum::{
+    body::Body,
     extract::Query,
-    http::StatusCode,
-    response::Json,
+    http::{header, StatusCode},
+    response::{Json, Response},
     routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Clone)]
@@ -18,6 +20,18 @@ struct AppState {
 #[derive(Deserialize)]
 struct BrowseParams {
     path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FileParams {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct TextContentResponse {
+    content: String,
+    truncated: bool,
+    size: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -179,6 +193,221 @@ async fn browse(
     }))
 }
 
+fn guess_mime(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "log",
+    "js", "ts", "jsx", "tsx", "svelte", "vue", "html", "css", "scss", "less",
+    "py", "rs", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb", "php",
+    "sh", "bash", "zsh", "fish", "bat", "ps1",
+    "sql", "graphql", "proto", "dockerfile", "makefile",
+    "env", "gitignore", "editorconfig", "prettierrc", "eslintrc",
+    "csv", "tsv", "lock",
+];
+
+const MAX_TEXT_SIZE: u64 = 512 * 1024; // 512 KB
+
+fn is_text_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Check common extensionless text files
+    if ["makefile", "dockerfile", "rakefile", "gemfile", "procfile"]
+        .contains(&name.as_str())
+    {
+        return true;
+    }
+
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| TEXT_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            ["jpg", "jpeg", "png", "gif", "svg", "webp", "bmp", "ico"]
+                .contains(&e.to_lowercase().as_str())
+        })
+        .unwrap_or(false)
+}
+
+async fn file_content(
+    Query(params): Query<FileParams>,
+    state: Arc<AppState>,
+) -> Result<Response<Body>, (StatusCode, Json<ErrorResponse>)> {
+    let path = PathBuf::from(&params.path);
+    let canonical = path.canonicalize().map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+    })?;
+
+    if !is_path_allowed(&canonical, &state.allowed_roots) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Access denied".to_string(),
+            }),
+        ));
+    }
+
+    if !canonical.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Path is not a file".to_string(),
+            }),
+        ));
+    }
+
+    if !is_image_file(&canonical) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Not a supported image file".to_string(),
+            }),
+        ));
+    }
+
+    let mime = guess_mime(&canonical);
+    let file = tokio::fs::File::open(&canonical).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to open file: {}", e),
+            }),
+        )
+    })?;
+
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CACHE_CONTROL, "public, max-age=60")
+        .body(body)
+        .unwrap())
+}
+
+async fn text_content(
+    Query(params): Query<FileParams>,
+    state: Arc<AppState>,
+) -> Result<Json<TextContentResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let path = PathBuf::from(&params.path);
+    let canonical = path.canonicalize().map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+    })?;
+
+    if !is_path_allowed(&canonical, &state.allowed_roots) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Access denied".to_string(),
+            }),
+        ));
+    }
+
+    if !canonical.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Path is not a file".to_string(),
+            }),
+        ));
+    }
+
+    if !is_text_file(&canonical) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Not a recognized text file".to_string(),
+            }),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to read metadata: {}", e),
+            }),
+        )
+    })?;
+
+    let size = metadata.len();
+    let truncated = size > MAX_TEXT_SIZE;
+
+    let bytes = if truncated {
+        let mut file = tokio::fs::File::open(&canonical).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to open file: {}", e),
+                }),
+            )
+        })?;
+        let mut buf = vec![0u8; MAX_TEXT_SIZE as usize];
+        use tokio::io::AsyncReadExt;
+        let n = file.read(&mut buf).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read file: {}", e),
+                }),
+            )
+        })?;
+        buf.truncate(n);
+        buf
+    } else {
+        tokio::fs::read(&canonical).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read file: {}", e),
+                }),
+            )
+        })?
+    };
+
+    let content = String::from_utf8_lossy(&bytes).to_string();
+
+    Ok(Json(TextContentResponse {
+        content,
+        truncated,
+        size,
+    }))
+}
+
 async fn roots(state: Arc<AppState>) -> Json<RootsResponse> {
     Json(RootsResponse {
         roots: state
@@ -228,6 +457,14 @@ async fn main() {
         .route("/api/roots", get({
             let state = state.clone();
             move || roots(state)
+        }))
+        .route("/api/file", get({
+            let state = state.clone();
+            move |query| file_content(query, state)
+        }))
+        .route("/api/text", get({
+            let state = state.clone();
+            move |query| text_content(query, state)
         }))
         .layer(cors);
 

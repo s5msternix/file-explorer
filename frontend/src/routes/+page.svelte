@@ -47,7 +47,7 @@
 		display: grid;
 		grid-template-rows: auto 1fr auto;
 		height: 100vh;
-		max-width: 960px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 16px;
 		gap: 12px;

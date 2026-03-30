@@ -15,4 +15,11 @@
  * @property {FileEntry[]} entries
  */
 
+/**
+ * @typedef {Object} TextContentResponse
+ * @property {string} content
+ * @property {boolean} truncated
+ * @property {number} size
+ */
+
 export {};

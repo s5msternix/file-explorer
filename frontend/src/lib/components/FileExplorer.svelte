@@ -1,6 +1,7 @@
 <script>
 	import Breadcrumb from './Breadcrumb.svelte';
 	import FileList from './FileList.svelte';
+	import FilePreview from './FilePreview.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import { browse } from '../api.js';
 
@@ -24,6 +25,8 @@
 	let error = $state(null);
 	/** @type {string|null} */
 	let lastSelectedPath = $state(null);
+	/** @type {import('../types').FileEntry|null} */
+	let previewEntry = $state(null);
 
 	let selectedEntries = $derived(
 		entries.filter((e) => selectedPaths.has(e.path))
@@ -36,6 +39,7 @@
 	async function loadDirectory(/** @type {string|null} */ path) {
 		loading = true;
 		error = null;
+		previewEntry = null;
 		try {
 			const data = await browse(path ?? undefined);
 			entries = data.entries;
@@ -85,6 +89,8 @@
 	function handleOpen(entry) {
 		if (entry.is_dir) {
 			loadDirectory(entry.path);
+		} else {
+			previewEntry = entry;
 		}
 	}
 
@@ -102,6 +108,10 @@
 
 	function refresh() {
 		loadDirectory(currentPath === '/' ? null : currentPath);
+	}
+
+	function closePreview() {
+		previewEntry = null;
 	}
 
 	loadDirectory(null);
@@ -138,27 +148,37 @@
 
 	<Breadcrumb path={currentPath} onNavigate={handleNavigate} />
 
-	{#if loading}
-		<div class="loading">
-			<div class="spinner"></div>
-			<span>Yukleniyor...</span>
+	<div class="main-area" class:has-preview={previewEntry !== null}>
+		<div class="file-panel">
+			{#if loading}
+				<div class="loading">
+					<div class="spinner"></div>
+					<span>Yukleniyor...</span>
+				</div>
+			{:else if error}
+				<div class="error">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="#ef4444">
+						<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+					</svg>
+					<p>{error}</p>
+					<button class="retry-btn" onclick={refresh}>Tekrar Dene</button>
+				</div>
+			{:else}
+				<FileList
+					{entries}
+					{selectedPaths}
+					onSelect={handleSelect}
+					onOpen={handleOpen}
+				/>
+			{/if}
 		</div>
-	{:else if error}
-		<div class="error">
-			<svg width="24" height="24" viewBox="0 0 24 24" fill="#ef4444">
-				<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-			</svg>
-			<p>{error}</p>
-			<button class="retry-btn" onclick={refresh}>Tekrar Dene</button>
-		</div>
-	{:else}
-		<FileList
-			{entries}
-			{selectedPaths}
-			onSelect={handleSelect}
-			onOpen={handleOpen}
-		/>
-	{/if}
+
+		{#if previewEntry}
+			<div class="preview-panel">
+				<FilePreview entry={previewEntry} onClose={closePreview} />
+			</div>
+		{/if}
+	</div>
 
 	<StatusBar
 		entryCount={entries.length}
@@ -211,6 +231,32 @@
 	.toolbar-btn:disabled {
 		opacity: 0.35;
 		cursor: not-allowed;
+	}
+
+	.main-area {
+		display: flex;
+		flex: 1;
+		overflow: hidden;
+	}
+
+	.file-panel {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		overflow: hidden;
+		min-width: 0;
+	}
+
+	.main-area.has-preview .file-panel {
+		flex: 1;
+		border-right: 1px solid #d1d5db;
+	}
+
+	.preview-panel {
+		flex: 1;
+		display: flex;
+		overflow: hidden;
+		min-width: 0;
 	}
 
 	.loading {
